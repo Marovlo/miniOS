@@ -1,0 +1,140 @@
+diff --git a/src/devices/tap_user.c b/src/devices/tap_user.c
+index 369292a..0206260 100644
+--- a/src/devices/tap_user.c
++++ b/src/devices/tap_user.c
+@@ -434,6 +434,122 @@ static void tap_addr_convert(net_addr_t* addr)
+     if (addr->ip[0] == 127) memcpy(addr->ip, GATEWAY_IP, 4);
+ }
+ 
++/* ── Minimal DNS proxy: intercept queries to port 53, resolve on host ──────── */
++#include <netdb.h>
++#include <arpa/inet.h>
++
++static void handle_dns_query(tap_dev_t* tap, const uint8_t* query, uint16_t query_len, net_addr_t* src)
++{
++    /* Parse DNS question to extract domain name */
++    if (query_len < 12) return; /* Too short for DNS header */
++
++    uint16_t txid = read_uint16_be_m(query);
++    uint16_t flags = read_uint16_be_m(query + 2);
++    uint16_t qdcount = read_uint16_be_m(query + 4);
++    (void)flags;
++
++    if (qdcount == 0) return;
++
++    /* Extract domain name from question section */
++    char domain[256] = {0};
++    size_t pos = 12; /* Skip DNS header */
++    size_t dpos = 0;
++    while (pos < query_len && query[pos] != 0 && dpos < sizeof(domain) - 2) {
++        uint8_t label_len = query[pos++];
++        if (label_len > 63 || pos + label_len > query_len) return;
++        if (dpos > 0) domain[dpos++] = '.';
++        memcpy(domain + dpos, query + pos, label_len);
++        dpos += label_len;
++        pos += label_len;
++    }
++    domain[dpos] = 0;
++    pos++; /* Skip null terminator */
++
++    /* Read QTYPE and QCLASS */
++    if (pos + 4 > query_len) return;
++    uint16_t qtype = read_uint16_be_m(query + pos);
++    /* uint16_t qclass = read_uint16_be_m(query + pos + 2); */
++    size_t question_end = pos + 4;
++
++    /* Resolve on host using getaddrinfo */
++    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
++    struct addrinfo *result = NULL;
++
++    if (qtype != 1 && qtype != 28) {
++        /* Only handle A (1) and AAAA (28) queries; for others, return NXDOMAIN */
++        goto send_nxdomain;
++    }
++
++    if (qtype == 28) hints.ai_family = AF_INET6;
++
++    int err = getaddrinfo(domain, NULL, &hints, &result);
++    if (err != 0 || result == NULL) {
++        goto send_nxdomain;
++    }
++
++    /* Build DNS response */
++    uint8_t resp[512];
++    size_t rlen = 0;
++
++    /* Copy header, set response flags */
++    memcpy(resp, query, 12);
++    resp[2] = 0x81; resp[3] = 0x80; /* QR=1, RD=1, RA=1 */
++    resp[6] = 0; resp[7] = 1; /* ANCOUNT = 1 */
++    rlen = 12;
++
++    /* Copy question section */
++    if (rlen + (question_end - 12) > sizeof(resp)) { freeaddrinfo(result); return; }
++    memcpy(resp + rlen, query + 12, question_end - 12);
++    rlen += question_end - 12;
++
++    /* Add answer: pointer to name + A record */
++    if (qtype == 1 && result->ai_family == AF_INET) {
++        struct sockaddr_in *sin = (struct sockaddr_in*)result->ai_addr;
++        if (rlen + 16 > sizeof(resp)) { freeaddrinfo(result); return; }
++        resp[rlen++] = 0xC0; resp[rlen++] = 0x0C; /* Name pointer to question */
++        resp[rlen++] = 0x00; resp[rlen++] = 0x01; /* TYPE A */
++        resp[rlen++] = 0x00; resp[rlen++] = 0x01; /* CLASS IN */
++        resp[rlen++] = 0x00; resp[rlen++] = 0x00;
++        resp[rlen++] = 0x00; resp[rlen++] = 0x3C; /* TTL 60s */
++        resp[rlen++] = 0x00; resp[rlen++] = 0x04; /* RDLENGTH 4 */
++        memcpy(resp + rlen, &sin->sin_addr.s_addr, 4);
++        rlen += 4;
++    }
++    freeaddrinfo(result);
++
++    /* Send response back to guest via UDP */
++    {
++        uint8_t frame[TAP_FRAME_SIZE];
++        uint8_t* ipv4 = create_eth_frame(tap, frame, ETH2_IPv4);
++        uint8_t* udp = create_ipv4_frame(ipv4, rlen + UDP_HDR_SIZE, IP_PROTO_UDP, src->ip, GATEWAY_IP);
++        create_udp_datagram(udp, rlen, src->port, 53);
++        memcpy(udp + UDP_HDR_SIZE, resp, rlen);
++        udp_ipv4_checksum(ipv4, rlen);
++        eth_send(tap, frame, rlen + UDP_HDR_SIZE + IPv4_HDR_SIZE + ETH2_HDR_SIZE);
++    }
++    return;
++
++send_nxdomain:
++    if (result) freeaddrinfo(result);
++    {
++        uint8_t resp[512];
++        memcpy(resp, query, query_len > sizeof(resp) ? sizeof(resp) : query_len);
++        size_t rlen = query_len > sizeof(resp) ? sizeof(resp) : query_len;
++        resp[2] = 0x81; resp[3] = 0x83; /* QR=1, RCODE=NXDOMAIN */
++        resp[6] = 0; resp[7] = 0; /* ANCOUNT = 0 */
++
++        uint8_t frame[TAP_FRAME_SIZE];
++        uint8_t* ipv4 = create_eth_frame(tap, frame, ETH2_IPv4);
++        uint8_t* udp = create_ipv4_frame(ipv4, rlen + UDP_HDR_SIZE, IP_PROTO_UDP, src->ip, GATEWAY_IP);
++        create_udp_datagram(udp, rlen, src->port, 53);
++        memcpy(udp + UDP_HDR_SIZE, resp, rlen);
++        udp_ipv4_checksum(ipv4, rlen);
++        eth_send(tap, frame, rlen + UDP_HDR_SIZE + IPv4_HDR_SIZE + ETH2_HDR_SIZE);
++    }
++}
++
++/* ──────────────────────────────────────────────────────────────────────────── */
++
+ static void handle_udp(tap_dev_t* tap, const uint8_t* buffer, size_t size, net_addr_t* dst, net_addr_t* src)
+ {
+     if (unlikely(size < UDP_HDR_SIZE)) {
+@@ -450,6 +566,12 @@ static void handle_udp(tap_dev_t* tap, const uint8_t* buffer, size_t size, net_a
+     }
+     udp_size -= UDP_HDR_SIZE;
+ 
++    /* Intercept DNS queries (port 53) and resolve on host */
++    if (dst->port == 53) {
++        handle_dns_query(tap, udb_buff, udp_size, src);
++        return;
++    }
++
+     spin_lock(&tap->lock);
+     tap_sock_t* ts = (tap_sock_t*)hashmap_get(&tap->udp_ports, src->port);
+     if (ts == NULL) {
