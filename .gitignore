@@ -1,6 +1,8 @@
 miniOS
 snapshot.bin
-images/Image
+images/*.img
+images/*.bin
+src/rvvm/
 build/
 *.o
 *.dSYM/
