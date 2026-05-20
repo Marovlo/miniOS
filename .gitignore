@@ -9,6 +9,8 @@ dist/
 images/*.img
 images/*.bin
 images/Image
+# But keep prebuilt/ (compressed, ready to use without rebuilding buildroot)
+!images/prebuilt/
 
 # RVVM upstream source (git clone)
 src/rvvm/
