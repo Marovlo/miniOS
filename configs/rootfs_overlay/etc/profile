@@ -1,0 +1,7 @@
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export HOME="/root"
+export TERM=linux
+export PS1='\u@minios:\w\$ '
+
+alias ll='ls -la'
+alias la='ls -A'
