@@ -1,10 +1,26 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Build rv64 Linux kernel + rootfs for RVVM
-# Requirements: git, make, gcc, wget, unzip, rsync, cpio, bc, perl
+#
+# On Linux: just run it, no extra deps beyond standard build tools
+#   apt install build-essential gcc g++ make wget git bc cpio rsync python3 perl file libncurses-dev libssl-dev bison flex
+#
+# On macOS: needs GNU tools from brew (see PROGRESS.md)
+#
 # Time: ~40-60 min first build, ~5 min incremental
 # Disk: ~5GB
 
 set -e
+
+# macOS: ensure GNU tools are in PATH
+if [[ "$(uname)" == "Darwin" ]]; then
+    export PATH="/tmp/gnubin:/opt/homebrew/opt/findutils/libexec/gnubin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/opt/gnu-tar/libexec/gnubin:/opt/homebrew/opt/gawk/libexec/gnubin:/opt/homebrew/bin:$PATH"
+    export HOSTCC="${HOSTCC:-gcc-14}"
+    export HOSTCXX="${HOSTCXX:-g++-14}"
+    mkdir -p /tmp/gnubin
+    ln -sf /opt/homebrew/bin/gpatch /tmp/gnubin/patch 2>/dev/null || true
+    export CONFIG_SHELL=/opt/homebrew/bin/bash
+    export SHELL=/opt/homebrew/bin/bash
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
