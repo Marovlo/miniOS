@@ -28,7 +28,7 @@ command -v clang >/dev/null || { echo "ERROR: clang not found. Install Xcode CLT
 command -v zstd  >/dev/null || { echo "ERROR: zstd not found. Run: brew install zstd"; exit 1; }
 
 # Locate RVVM binary
-RVVM_BIN=$(find "$RVVM_DIR" -path "*/release.darwin.*/rvvm_*" -type f | head -1)
+RVVM_BIN=$(find "$RVVM_DIR" -path "*/release.darwin.*/rvvm_*" -type f ! -name "*.o" ! -name "*.d" | head -1)
 [ -n "$RVVM_BIN" ] || { echo "ERROR: RVVM not compiled. Run: cd src/rvvm && make ..."; exit 1; }
 echo "  RVVM binary: $RVVM_BIN"
 
