@@ -1,0 +1,7 @@
+miniOS
+snapshot.bin
+images/Image
+build/
+*.o
+*.dSYM/
+.DS_Store
