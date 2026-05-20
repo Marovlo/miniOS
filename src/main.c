@@ -26,6 +26,19 @@
 #include "miniz.h"
 #endif
 
+// Zstd compressed embedded kernel image (when compiled with EMBED_IMAGE_ZST)
+#ifdef EMBED_IMAGE_ZST
+#include "embedded_image_zst.h"
+// Only need a few zstd decompression functions (from zstddeclib.c)
+#include <stddef.h>
+#define ZSTD_CONTENTSIZE_UNKNOWN (0ULL - 1)
+#define ZSTD_CONTENTSIZE_ERROR   (0ULL - 2)
+extern unsigned long long ZSTD_getFrameContentSize(const void *src, size_t srcSize);
+extern size_t ZSTD_decompress(void *dst, size_t dstCapacity, const void *src, size_t compressedSize);
+extern unsigned ZSTD_isError(size_t code);
+extern const char* ZSTD_getErrorName(size_t code);
+#endif
+
 // --- Configuration ---
 static uint32_t ram_amt = 64*1024*1024;
 static int fail_on_all_faults = 0;
@@ -60,17 +73,23 @@ static uint8_t *ram_image = NULL;
 static struct MiniRV32IMAState *core;
 
 // =========================================================================
-// Snapshot save/load
+// Snapshot save/load (with compression)
 // =========================================================================
 
+// Always include miniz for snapshot compression (it has both compress + decompress)
+#ifndef EMBED_IMAGE_GZ
+#include "miniz.h"
+#endif
+
 #define SNAPSHOT_MAGIC 0x4D494E49  // "MINI"
-#define SNAPSHOT_VERSION 1
+#define SNAPSHOT_VERSION 2         // v2 = compressed
 
 struct SnapshotHeader {
 	uint32_t magic;
 	uint32_t version;
 	uint32_t ram_size;
 	uint32_t state_size;
+	uint32_t compressed_size;  // 0 = uncompressed (v1 compat)
 };
 
 static int snapshot_save(const char *path) {
@@ -80,19 +99,40 @@ static int snapshot_save(const char *path) {
 		return -1;
 	}
 
+	// Compress RAM with zlib level 9 (mostly zeros = great compression)
+	mz_ulong comp_bound = mz_compressBound(ram_amt);
+	uint8_t *comp_buf = malloc(comp_bound);
+	if (!comp_buf) {
+		fprintf(stderr, "\nminiOS: failed to allocate compression buffer\n");
+		fclose(f);
+		return -1;
+	}
+
+	mz_ulong comp_size = comp_bound;
+	int res = mz_compress2(comp_buf, &comp_size, ram_image, ram_amt, 9);
+	if (res != MZ_OK) {
+		fprintf(stderr, "\nminiOS: compression failed (%d)\n", res);
+		free(comp_buf);
+		fclose(f);
+		return -1;
+	}
+
 	struct SnapshotHeader hdr = {
 		.magic = SNAPSHOT_MAGIC,
 		.version = SNAPSHOT_VERSION,
 		.ram_size = ram_amt,
-		.state_size = sizeof(struct MiniRV32IMAState)
+		.state_size = sizeof(struct MiniRV32IMAState),
+		.compressed_size = (uint32_t)comp_size
 	};
 
 	fwrite(&hdr, sizeof(hdr), 1, f);
 	fwrite(core, sizeof(struct MiniRV32IMAState), 1, f);
-	fwrite(ram_image, ram_amt, 1, f);
+	fwrite(comp_buf, comp_size, 1, f);
 	fclose(f);
+	free(comp_buf);
 
-	fprintf(stderr, "\nminiOS: snapshot saved to '%s' (%u MB)\n", path, ram_amt / (1024*1024));
+	fprintf(stderr, "\nminiOS: snapshot saved to '%s' (%u MB -> %.1f MB compressed)\n",
+		path, ram_amt / (1024*1024), (float)comp_size / (1024*1024));
 	return 0;
 }
 
@@ -116,7 +156,7 @@ static int snapshot_load(const char *path) {
 		return -1;
 	}
 
-	if (hdr.version != SNAPSHOT_VERSION) {
+	if (hdr.version != SNAPSHOT_VERSION && hdr.version != 1) {
 		fprintf(stderr, "miniOS: unsupported snapshot version %u\n", hdr.version);
 		fclose(f);
 		return -1;
@@ -140,10 +180,35 @@ static int snapshot_load(const char *path) {
 		return -1;
 	}
 
-	if (fread(ram_image, ram_amt, 1, f) != 1) {
-		fprintf(stderr, "miniOS: failed to read RAM image\n");
-		fclose(f);
-		return -1;
+	if (hdr.version == 1 || hdr.compressed_size == 0) {
+		// Uncompressed v1 format
+		if (fread(ram_image, ram_amt, 1, f) != 1) {
+			fprintf(stderr, "miniOS: failed to read RAM image\n");
+			fclose(f);
+			return -1;
+		}
+	} else {
+		// Compressed v2 format
+		uint8_t *comp_buf = malloc(hdr.compressed_size);
+		if (!comp_buf) {
+			fprintf(stderr, "miniOS: failed to allocate decompression buffer\n");
+			fclose(f);
+			return -1;
+		}
+		if (fread(comp_buf, hdr.compressed_size, 1, f) != 1) {
+			fprintf(stderr, "miniOS: failed to read compressed data\n");
+			free(comp_buf);
+			fclose(f);
+			return -1;
+		}
+		mz_ulong decomp_size = ram_amt;
+		int res = mz_uncompress(ram_image, &decomp_size, comp_buf, hdr.compressed_size);
+		free(comp_buf);
+		if (res != MZ_OK) {
+			fprintf(stderr, "miniOS: snapshot decompression failed (%d)\n", res);
+			fclose(f);
+			return -1;
+		}
 	}
 
 	fclose(f);
@@ -316,7 +381,7 @@ int main(int argc, char **argv) {
 	}
 
 	if (!image_file && !snapshot_load_path) {
-#if defined(EMBED_IMAGE) || defined(EMBED_IMAGE_GZ)
+#if defined(EMBED_IMAGE) || defined(EMBED_IMAGE_GZ) || defined(EMBED_IMAGE_ZST)
 		// Use embedded image - no file needed
 #else
 		print_usage(argv[0]);
@@ -417,6 +482,28 @@ int main(int argc, char **argv) {
 			}
 			fprintf(stderr, "miniOS: decompressed kernel %lu -> %ld bytes\n",
 				(unsigned long)gz_len, flen);
+		}
+#endif
+#ifdef EMBED_IMAGE_ZST
+		else {
+			// Decompress embedded zstd image
+			unsigned long long const decompSize = ZSTD_getFrameContentSize(images_Image_zst, images_Image_zst_len);
+			if (decompSize == ZSTD_CONTENTSIZE_ERROR || decompSize == ZSTD_CONTENTSIZE_UNKNOWN) {
+				fprintf(stderr, "miniOS: invalid zstd data\n");
+				return 1;
+			}
+			if (decompSize > ram_amt) {
+				fprintf(stderr, "miniOS: decompressed image too large\n");
+				return 1;
+			}
+			size_t result = ZSTD_decompress(ram_image, ram_amt, images_Image_zst, images_Image_zst_len);
+			if (ZSTD_isError(result)) {
+				fprintf(stderr, "miniOS: zstd decompression failed: %s\n", ZSTD_getErrorName(result));
+				return 1;
+			}
+			flen = result;
+			fprintf(stderr, "miniOS: decompressed kernel %u -> %ld bytes (zstd)\n",
+				images_Image_zst_len, flen);
 		}
 #endif
 

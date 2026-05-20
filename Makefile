@@ -5,22 +5,27 @@ TARGET = miniOS
 SRC = src/main.c
 IMAGE = images/Image
 
-.PHONY: all clean run image help standalone
+.PHONY: all clean run image help standalone standalone-gz standalone-zst
 
 all: $(TARGET)
 
 $(TARGET): $(SRC) src/mini-rv32ima.h src/default64mbdtc.h
-	$(CC) $(CFLAGS) -I src -o $@ $(SRC)
+	$(CC) $(CFLAGS) -I src -o $@ $(SRC) src/miniz.c
 
-# Build standalone single-binary (kernel embedded in executable)
+# Build standalone single-binary (kernel embedded in executable, uncompressed)
 standalone: $(IMAGE) src/embedded_image.h
-	$(CC) $(CFLAGS) -DEMBED_IMAGE -I src -o $(TARGET) $(SRC)
+	$(CC) $(CFLAGS) -DEMBED_IMAGE -I src -o $(TARGET) $(SRC) src/miniz.c
 	@echo "Built standalone miniOS ($$(du -h $(TARGET) | cut -f1), no external files needed)"
 
-# Build standalone with gzip-compressed kernel (smaller binary)
+# Build standalone with gzip-compressed kernel
 standalone-gz: $(IMAGE) src/embedded_image_gz.h
 	$(CC) $(CFLAGS) -DEMBED_IMAGE_GZ -I src -o $(TARGET) $(SRC) src/miniz.c
-	@echo "Built compressed miniOS ($$(du -h $(TARGET) | cut -f1), no external files needed)"
+	@echo "Built gzip-compressed miniOS ($$(du -h $(TARGET) | cut -f1))"
+
+# Build standalone with zstd-compressed kernel (best size, recommended)
+standalone-zst: $(IMAGE) src/embedded_image_zst.h
+	$(CC) $(CFLAGS) -DEMBED_IMAGE_ZST -I src -o $(TARGET) $(SRC) src/miniz.c src/zstddeclib.c
+	@echo "Built zstd-compressed miniOS ($$(du -h $(TARGET) | cut -f1))"
 
 src/embedded_image.h: $(IMAGE)
 	xxd -i images/Image > src/embedded_image.h
@@ -29,6 +34,11 @@ src/embedded_image_gz.h: $(IMAGE)
 	gzip -k -9 -f images/Image
 	xxd -i images/Image.gz > src/embedded_image_gz.h
 	rm -f images/Image.gz
+
+src/embedded_image_zst.h: $(IMAGE)
+	zstd -19 -f images/Image -o images/Image.zst
+	xxd -i images/Image.zst > src/embedded_image_zst.h
+	rm -f images/Image.zst
 
 # Download pre-built Linux kernel image for rv32
 image: $(IMAGE)
@@ -49,7 +59,7 @@ restore: $(TARGET)
 	./$(TARGET) --load snapshot.bin
 
 clean:
-	rm -f $(TARGET) src/embedded_image.h
+	rm -f $(TARGET) src/embedded_image.h src/embedded_image_gz.h src/embedded_image_zst.h
 
 help:
 	@echo "miniOS build targets:"
