@@ -308,11 +308,32 @@ static void server_main(const char *datadir, const char *rvvm_path, char **rvvm_
     /* Set PTY master non-blocking */
     fcntl(pty_master, F_SETFL, fcntl(pty_master, F_GETFL) | O_NONBLOCK);
 
+    /* Install SIGTERM handler: kill RVVM child before exiting */
+    signal(SIGTERM, SIG_IGN); /* Temporarily ignore while we set up */
+
     /* Create listen socket */
     int listen_fd = create_listen_socket(sock_path);
 
     /* Write PID file (our daemon PID) */
     write_pidfile(pid_path, getpid());
+
+    /* Now install proper SIGTERM handler */
+    struct sigaction sa_term;
+    memset(&sa_term, 0, sizeof(sa_term));
+    sa_term.sa_handler = SIG_DFL; /* Will terminate us, but first we kill RVVM via atexit-like */
+    sigaction(SIGTERM, &sa_term, NULL);
+
+    /* Use atexit-like behavior: on SIGTERM, kill RVVM before we die.
+     * Simplest: just kill RVVM in the stop_instance sender side.
+     * But also protect with a signal handler that kills the child: */
+    {
+        /* We rely on the stop_instance code sending SIGTERM to RVVM's pid too.
+         * Store RVVM pid alongside daemon pid in the pidfile. */
+        char pid_content[64];
+        snprintf(pid_content, sizeof(pid_content), "%d\n%d\n", (int)getpid(), (int)rvvm_pid);
+        FILE *pf = fopen(pid_path, "w");
+        if (pf) { fputs(pid_content, pf); fclose(pf); }
+    }
 
     /* Replay buffer: stores last N bytes of PTY output.
      * When a new client connects, we replay this so they see the current
@@ -550,37 +571,49 @@ static int stop_instance(const char *datadir) {
     path_join(pid_path,  sizeof(pid_path),  datadir, "minios.pid");
     path_join(sock_path, sizeof(sock_path), datadir, "minios.sock");
 
-    pid_t pid = read_pidfile(pid_path);
-    if (pid <= 0) {
-        /* No pidfile, but maybe stale socket? */
+    /* Read pidfile (may contain two lines: daemon_pid and rvvm_pid) */
+    FILE *pf = fopen(pid_path, "r");
+    if (!pf) {
+        unlink(sock_path);
+        return -1;
+    }
+    pid_t daemon_pid = 0, rvvm_pid = 0;
+    char line[64];
+    if (fgets(line, sizeof(line), pf)) daemon_pid = atoi(line);
+    if (fgets(line, sizeof(line), pf)) rvvm_pid = atoi(line);
+    fclose(pf);
+
+    if (daemon_pid <= 0) {
         unlink(sock_path);
         unlink(pid_path);
         return -1;
     }
 
-    /* Check if process is alive */
-    if (kill(pid, 0) < 0) {
-        /* Process dead, clean up stale files */
+    /* Check if daemon is alive */
+    if (kill(daemon_pid, 0) < 0 && (rvvm_pid <= 0 || kill(rvvm_pid, 0) < 0)) {
+        /* Both dead, clean up stale files */
         unlink(sock_path);
         unlink(pid_path);
         return -1;
     }
 
-    /* Send SIGTERM and wait */
-    kill(pid, SIGTERM);
+    /* Kill both daemon and RVVM */
+    if (rvvm_pid > 0) kill(rvvm_pid, SIGTERM);
+    kill(daemon_pid, SIGTERM);
     for (int i = 0; i < 30; i++) { /* wait up to 3 seconds */
         usleep(100000);
-        if (kill(pid, 0) < 0) break;
+        int daemon_dead = (kill(daemon_pid, 0) < 0);
+        int rvvm_dead = (rvvm_pid <= 0 || kill(rvvm_pid, 0) < 0);
+        if (daemon_dead && rvvm_dead) break;
     }
-    if (kill(pid, 0) == 0) {
-        /* Still alive, force kill */
-        kill(pid, SIGKILL);
-        usleep(200000);
-    }
+    /* Force kill if still alive */
+    if (kill(daemon_pid, 0) == 0) kill(daemon_pid, SIGKILL);
+    if (rvvm_pid > 0 && kill(rvvm_pid, 0) == 0) kill(rvvm_pid, SIGKILL);
+    usleep(200000);
 
     unlink(sock_path);
     unlink(pid_path);
-    fprintf(stderr, "minios: stopped (pid %d).\n", (int)pid);
+    fprintf(stderr, "minios: stopped (pid %d).\n", (int)daemon_pid);
     return 0;
 }
 
