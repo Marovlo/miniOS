@@ -38,6 +38,17 @@
      - launcher.c 通过 `ld -r -b binary` 把 4 个 .zst 嵌入符号 `_binary_<name>_start/end`
      - 启动时 `mkdtemp` → `ZSTD_decompress` → `fork`+`execv rvvm` → `waitpid` → `nftw(rm)`
 
+6. **持久化文件系统** — ✅ **已完成 (2026-05-20)**
+   - 默认行为：rootfs.img 持久化到 `~/.local/share/minios/rootfs.img`
+   - 首次运行从嵌入的 zstd 压缩包解压；后续运行直接复用（guest 修改保留）
+   - 命令行参数：
+     - `--ephemeral`：不持久化，退出即丢（原有行为）
+     - `--reset`：清掉数据目录，从出厂状态重新开始
+     - `--datadir PATH`：自定义数据目录
+     - `--help`：显示帮助
+   - 只读资源（rvvm/fw_jump/Image）仍每次解压到临时目录，退出时清理
+   - 已验证：首次启动解压 → 第二次启动复用（不重新解压）→ --reset 删掉重建 → --ephemeral 不留痕迹
+
 ### 压缩比一览
 | 资源 | 原始 | 压缩后 | 比率 |
 |---|---|---|---|
@@ -48,7 +59,7 @@
 | **总产物（单文件）** | — | **14.3 M** | — |
 
 ### 当前卡点
-无。Linux x86_64 单文件目标达成。下一步：跨平台覆盖。
+无。Linux x86_64 单文件 + 持久化已完成。下一步：跨平台覆盖 + 功能完善。
 
 ### 关键修复（已写回脚本，下次重建会自动应用）
 - `BR2_LINUX_KERNEL_USE_DEFCONFIG="defconfig"` 会被 buildroot 拼成 `defconfig_defconfig`（不存在）。
@@ -130,9 +141,10 @@ make -j$(nproc)
 - ✅ 验证网络（DHCP 自动获取 IP，wget 能联网） — 烟测中 udhcpc 已成功拿到 192.168.0.100
 - ✅ 验证块设备（rootfs 可读写） — `EXT4-fs (nvme0n1): re-mounted ... r/w`
 - ✅ 实现 zstd 压缩嵌入（单文件打包）— `dist/minios-linux-x86_64` 14.3 M，已通过端到端启动测试
+- ✅ 实现持久化文件系统 — 默认 `~/.local/share/minios/rootfs.img`，支持 --ephemeral/--reset/--datadir
 - ⏳ 跨平台覆盖：Linux aarch64 / macOS arm64 / macOS x86_64 / Windows x64（见下文路线）
 - ⏳ 通过网络安装 tcc 和 micropython
-- ⏳ 实现快照 save/load（移植 v0.1 的逻辑）
+- ⏳ 实现快照 save/load（移植 v0.1 的逻辑，注意 RVVM 上游目前无此功能）
 
 ---
 
@@ -218,5 +230,53 @@ miniOS/
 
 - `build/` 目录很大（~5GB），迁移时可以不带，让脚本重新下载
 - `src/rvvm/` 是 git clone 的，迁移时也可以重新 clone
-- 核心需要迁移的是：`configs/`、`scripts/`、`images/fw_*.bin`、`Makefile`、`README.md`
-- buildroot 构建脚本 (`scripts/build-images.sh`) 的 shebang 是 `/opt/homebrew/bin/bash`，在 Linux 上需要改回 `#!/bin/bash`
+- 核心需要迁移的是：`configs/`、`scripts/`、`src/launcher/`、`Makefile`、`README.md`
+- buildroot 构建脚本 (`scripts/build-images.sh`) shebang 已是 `#!/bin/bash`
+- 当前云服务器环境：TencentOS 4.2, gcc 12.3.1, 32 核, /data/workspace/miniOS
+
+---
+
+## 给下一个 AI 的接续指引
+
+### Git 状态
+- 仓库：`https://github.com/Marovlo/miniOS`，branch `master`
+- 最新 commit：`481a627` (feat: persistent rootfs)
+- 上一个 commit：`2efc936` (v0.2 single-file)
+- 所有代码已推送
+
+### 当前环境（云服务器 /data/workspace/miniOS）
+- `build/buildroot-2024.02.9/` — buildroot 已编译完成，增量 rebuild 秒级
+- `src/rvvm/` — RVVM 源码，已编译静态版于 `release.linux.x86_64/rvvm_x86_64`
+- `images/` — fw_jump.bin + Image + rootfs.img 就绪
+- `dist/minios-linux-x86_64` — 14.3 MB 单文件产物（含持久化版 launcher）
+- `build/embed/*.zst.o` — 已打好的 embed object 文件，重新链接只需重编 launcher.c
+
+### 一键重建命令
+```bash
+cd /data/workspace/miniOS
+# 如果改了 launcher.c，只需重编链接（15 秒）：
+gcc -O2 -Wall src/launcher/launcher.c \
+    build/embed/rvvm.zst.o build/embed/fw_jump.bin.zst.o \
+    build/embed/Image.zst.o build/embed/rootfs.img.zst.o \
+    -static -static-libgcc /usr/lib64/libzstd.a \
+    -o dist/minios-linux-x86_64 && strip dist/minios-linux-x86_64
+
+# 如果改了 kernel config / rootfs 包：
+./scripts/build-images.sh      # 全量 ~25 min，增量 ~30 sec
+./scripts/build-rvvm-static.sh # ~30 sec
+./scripts/build-single.sh      # ~15 sec（压缩 + 链接）
+```
+
+### 推荐下一步（按优先级）
+1. **跨平台 - Linux aarch64**：在 ARM Linux 上跑 `build-rvvm-static.sh` + `build-single.sh`（零代码改动）
+2. **跨平台 - macOS arm64**：在 mac 上编 RVVM + 调整 launcher 链接（mac 不能 -static，链 libSystem.dylib）
+3. **tcc/micropython**：在 guest 内 `wget` 下载 tcc 源码 → 编译安装（验证 guest 开发环境可用）
+4. **快照 save/load**：RVVM 上游无此功能；要么提 PR / 魔改 RVVM 加 save/load，要么用 CRIU 冻结进程（但违反"无依赖"原则）
+
+### 设计决策记录
+- **为什么用 RVVM 而不是 QEMU**：单文件 1.2 MB 静态链接，30K LOC 可维护，上游活跃
+- **为什么 guest 是 RISC-V 而不是 x86**：RVVM 只支持 RISC-V；x86 模拟器（QEMU/Bochs）太大不适合单文件嵌入
+- **为什么不用 initramfs**：rootfs 直接挂 NVMe ext4 更简单，且持久化只需保留一个文件（rootfs.img）
+- **性能**：RVVM + RVJIT 软件模拟比原生慢 5-20x，定位是教学/演示/轻量沙盒，不是生产环境
+- **持久化策略**：默认持久化（rootfs 在 datadir），--ephemeral 退出即丢。不做 snapshot（复杂度高且 RVVM 不支持）
+
