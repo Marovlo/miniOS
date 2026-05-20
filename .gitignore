@@ -1,9 +1,22 @@
-miniOS
-snapshot.bin
-images/*.img
-images/*.bin
-src/rvvm/
+# Build artifacts
 build/
+build.log
+dist/
 *.o
 *.dSYM/
+
+# Binary images (too large; rebuilt via scripts/build-images.sh)
+images/*.img
+images/*.bin
+images/Image
+
+# RVVM upstream source (git clone)
+src/rvvm/
+
+# Legacy
+miniOS
+snapshot.bin
+
+# OS junk
 .DS_Store
+post-build-test.log

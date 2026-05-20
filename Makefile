@@ -1,6 +1,7 @@
 # miniOS Makefile (RVVM-based)
 RVVM_DIR = src/rvvm
-RVVM_BIN = $(RVVM_DIR)/release.darwin.arm64/rvvm_arm64
+# Auto-detect RVVM binary across host platforms (Linux x86_64, macOS arm64, ...)
+RVVM_BIN = $(firstword $(wildcard $(RVVM_DIR)/release.*/rvvm_*))
 IMAGES_DIR = images
 
 .PHONY: all clean run help rvvm image
@@ -10,7 +11,7 @@ all: rvvm
 # Build RVVM emulator
 rvvm:
 	cd $(RVVM_DIR) && make -j$$(sysctl -n hw.ncpu 2>/dev/null || nproc)
-	@echo "RVVM built: $(RVVM_BIN)"
+	@echo "RVVM built: $(firstword $(wildcard $(RVVM_DIR)/release.*/rvvm_*))"
 
 # Build Linux kernel + rootfs from source
 image:

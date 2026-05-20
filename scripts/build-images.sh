@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Build rv64 Linux kernel + rootfs for RVVM
 #
 # On Linux: just run it, no extra deps beyond standard build tools
@@ -69,25 +69,40 @@ echo "       This takes 40-60 min on first run. Go grab a coffee."
 echo ""
 make -j"$NPROC"
 
-# Step 4: Patch kernel config to ensure RVVM drivers are enabled
-# (The rv64 defconfig should already include NVMe and RTL8169, but let's verify)
-echo "[4/5] Verifying kernel drivers for RVVM..."
+# Step 4: Patch kernel config to ensure RVVM drivers are enabled as builtin (=y).
+# Buildroot's arch defconfig may have NVMe/EXT4 as =m (modules); but we have no
+# initramfs to load modules before mounting root, so they MUST be builtin.
+echo "[4/5] Verifying kernel drivers for RVVM (must be =y, not =m)..."
 KCONFIG="$BR_DIR/output/build/linux-6.6.70/.config"
 if [ -f "$KCONFIG" ]; then
     NEEDS_REBUILD=0
-    for opt in CONFIG_R8169 CONFIG_BLK_DEV_NVME CONFIG_EXT4_FS CONFIG_PCI; do
-        if ! grep -q "^${opt}=y" "$KCONFIG" && ! grep -q "^${opt}=m" "$KCONFIG"; then
-            echo "       Enabling $opt..."
-            echo "${opt}=y" >> "$KCONFIG"
-            NEEDS_REBUILD=1
+    REQUIRED_Y="CONFIG_R8169 CONFIG_BLK_DEV_NVME CONFIG_NVME_CORE CONFIG_EXT4_FS CONFIG_PCI"
+    for opt in $REQUIRED_Y; do
+        if grep -q "^${opt}=y" "$KCONFIG"; then
+            continue
         fi
+        # Either =m or unset -> force =y
+        echo "       Forcing ${opt}=y..."
+        sed -i.bak -e "/^${opt}=/d" -e "/^# ${opt} is not set/d" "$KCONFIG"
+        echo "${opt}=y" >> "$KCONFIG"
+        NEEDS_REBUILD=1
     done
+    rm -f "${KCONFIG}.bak"
     if [ "$NEEDS_REBUILD" -eq 1 ]; then
-        echo "       Rebuilding kernel with updated config..."
-        make linux-rebuild -j"$NPROC"
-        make -j"$NPROC"
+        echo "       Re-running olddefconfig + rebuilding kernel..."
+        ( cd "$BR_DIR/output/build/linux-6.6.70" && \
+          make ARCH=riscv \
+               CROSS_COMPILE="$BR_DIR/output/host/bin/riscv64-buildroot-linux-musl-" \
+               olddefconfig )
+        # Drop stamps to force kernel rebuild + rootfs repack
+        rm -f "$BR_DIR/output/build/linux-6.6.70/.stamp_built" \
+              "$BR_DIR/output/build/linux-6.6.70/.stamp_target_installed" \
+              "$BR_DIR/output/build/linux-6.6.70/.stamp_images_installed"
+        rm -f "$BR_DIR/output/images/rootfs.ext2" \
+              "$BR_DIR/output/images/rootfs.tar"
+        ( cd "$BR_DIR" && make -j"$NPROC" )
     else
-        echo "       All required drivers already enabled."
+        echo "       All required drivers already builtin (=y)."
     fi
 fi
 
