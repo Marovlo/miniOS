@@ -20,6 +20,12 @@
 #include "embedded_image.h"
 #endif
 
+// Compressed embedded kernel image (when compiled with EMBED_IMAGE_GZ)
+#ifdef EMBED_IMAGE_GZ
+#include "embedded_image_gz.h"
+#include "miniz.h"
+#endif
+
 // --- Configuration ---
 static uint32_t ram_amt = 64*1024*1024;
 static int fail_on_all_faults = 0;
@@ -310,7 +316,7 @@ int main(int argc, char **argv) {
 	}
 
 	if (!image_file && !snapshot_load_path) {
-#ifdef EMBED_IMAGE
+#if defined(EMBED_IMAGE) || defined(EMBED_IMAGE_GZ)
 		// Use embedded image - no file needed
 #else
 		print_usage(argv[0]);
@@ -368,6 +374,49 @@ int main(int argc, char **argv) {
 				return 1;
 			}
 			memcpy(ram_image, images_Image, flen);
+		}
+#endif
+#ifdef EMBED_IMAGE_GZ
+		else {
+			// Decompress embedded gzip image using raw inflate
+			// Gzip format: 10-byte header + compressed data + 8-byte trailer
+			// We skip the header and trailer, inflate the raw deflate stream
+			const uint8_t *gz = images_Image_gz;
+			size_t gz_len = images_Image_gz_len;
+
+			// Parse gzip header (minimum 10 bytes)
+			if (gz_len < 18 || gz[0] != 0x1f || gz[1] != 0x8b) {
+				fprintf(stderr, "miniOS: invalid gzip data\n");
+				return 1;
+			}
+			size_t hdr_len = 10;
+			uint8_t flags = gz[3];
+			if (flags & 0x04) { hdr_len += 2 + gz[hdr_len] + (gz[hdr_len+1]<<8); } // FEXTRA
+			if (flags & 0x08) { while (gz[hdr_len++]); } // FNAME
+			if (flags & 0x10) { while (gz[hdr_len++]); } // FCOMMENT
+			if (flags & 0x02) { hdr_len += 2; } // FHCRC
+
+			mz_stream stream;
+			memset(&stream, 0, sizeof(stream));
+			stream.next_in = gz + hdr_len;
+			stream.avail_in = gz_len - hdr_len - 8;
+			stream.next_out = ram_image;
+			stream.avail_out = ram_amt;
+
+			if (mz_inflateInit2(&stream, -MZ_DEFAULT_WINDOW_BITS) != MZ_OK) {
+				fprintf(stderr, "miniOS: failed to init decompressor\n");
+				return 1;
+			}
+			int res = mz_inflate(&stream, MZ_FINISH);
+			flen = stream.total_out;
+			mz_inflateEnd(&stream);
+
+			if (res != MZ_STREAM_END) {
+				fprintf(stderr, "miniOS: decompression failed (%d)\n", res);
+				return 1;
+			}
+			fprintf(stderr, "miniOS: decompressed kernel %lu -> %ld bytes\n",
+				(unsigned long)gz_len, flen);
 		}
 #endif
 

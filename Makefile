@@ -17,8 +17,18 @@ standalone: $(IMAGE) src/embedded_image.h
 	$(CC) $(CFLAGS) -DEMBED_IMAGE -I src -o $(TARGET) $(SRC)
 	@echo "Built standalone miniOS ($$(du -h $(TARGET) | cut -f1), no external files needed)"
 
+# Build standalone with gzip-compressed kernel (smaller binary)
+standalone-gz: $(IMAGE) src/embedded_image_gz.h
+	$(CC) $(CFLAGS) -DEMBED_IMAGE_GZ -I src -o $(TARGET) $(SRC) src/miniz.c
+	@echo "Built compressed miniOS ($$(du -h $(TARGET) | cut -f1), no external files needed)"
+
 src/embedded_image.h: $(IMAGE)
 	xxd -i images/Image > src/embedded_image.h
+
+src/embedded_image_gz.h: $(IMAGE)
+	gzip -k -9 -f images/Image
+	xxd -i images/Image.gz > src/embedded_image_gz.h
+	rm -f images/Image.gz
 
 # Download pre-built Linux kernel image for rv32
 image: $(IMAGE)
